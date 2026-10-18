@@ -1,0 +1,15 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy
+pandas
+scipy
+pydantic>=2
+openpyxl
+yfinance
+pyjwt[crypto]
+python-dotenv
+apscheduler
+psycopg2-binary   # only needed for Supabase/Postgres
+anthropic         # optional
+pytest
+httpx
