@@ -99,9 +99,8 @@ def auth(authorization: str = Header(None)):
     try:
         u = repo.resolve_user(DBH, sub, email); _uc[sub] = (time.time(), u); return u
     except Exception as e:
-        # If database connection fails/times out, fall back gracefully to super_admin/admin for owner email
-        default_role = "super_admin" if email and "lakhani" in email.lower() else "admin"
-        return {"sub": sub, "email": email, "org": "default-org", "role": default_role}
+        # If database connection fails, don't silently assign roles — raise a clear error
+        raise HTTPException(503, f"Database temporarily unavailable. Please try again in a moment.")
 
 def need(perm):
     def dep(u=Depends(auth)):
@@ -119,7 +118,7 @@ def me(u=Depends(auth)):
 
 # ---------------------------------------------------------------- portfolios
 @app.get("/api/portfolios")
-def plist(u=Depends(need("read"))): return [{"id": "demo", "name": "Demo book (12 positions)", "n_positions": 12, "source": "demo"}] + repo.list_portfolios(DBH, u["org"])
+def plist(admin_id: str = None, u=Depends(need("read"))): return [{"id": "demo", "name": "Demo book (12 positions)", "n_positions": 12, "source": "demo"}] + repo.list_portfolios(DBH, u["org"], user_id=u["sub"], role=u["role"], filter_admin_id=admin_id)
 
 @app.post("/api/portfolios")
 async def upload(request: Request, name: str = "My portfolio", filename: str = "upload.csv", telegram_bot_token: str = "", telegram_chat_id: str = "", u=Depends(need("write"))):
@@ -145,7 +144,7 @@ def big(n: int = 5000, telegram_bot_token: str = "", telegram_chat_id: str = "",
     rows = E.demo_large(min(max(n, 100), 100000)); return {"id": repo.create_portfolio(DBH, u["org"], u["sub"], f"Generated book ({len(rows):,} positions)", rows, "generated", telegram_bot_token or None, telegram_chat_id or None), "report": {"rows_ok": len(rows)}}
 
 @app.post("/api/portfolios/{pid}/delete")
-def delete(pid: str, u=Depends(need("write"))): repo.delete_portfolio(DBH, u["org"], u["sub"], pid); SVC.cache.clear(); return {"ok": True}
+def delete(pid: str, u=Depends(need("write"))): repo.delete_portfolio(DBH, u["org"], u["sub"], pid, role=u["role"]); SVC.cache.clear(); return {"ok": True}
 
 class TelegramSettings(BaseModel):
     telegram_bot_token: str = ""

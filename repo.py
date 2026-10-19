@@ -18,11 +18,10 @@ def resolve_user(db, sub, email):
     """First sign-in: join a pending invite by email, else create a pending member record. First user of org becomes super_admin."""
     m = db.one("select * from members where user_id=%s", (sub,))
     if not m and email:
-        # Check by email (either pending without user_id or previous record created with same email)
-        m = db.one("select * from members where email=%s and (user_id is null or user_id=%s)", (email, sub))
-        if not m:
-            m = db.one("select * from members where email=%s order by created_at asc limit 1", (email,))
+        # Check by email for pending invites (user_id is null) only
+        m = db.one("select * from members where email=%s and user_id is null", (email,))
         if m:
+            # Link the pending invite to this user
             db.run("update members set user_id=%s where id=%s", (sub, m["id"]))
             audit(db, m["org_id"], sub, "member.join", "member", m["id"])
     if not m:
@@ -43,14 +42,15 @@ def resolve_user(db, sub, email):
             except Exception as e:
                 # Handle duplicate insertion (race condition or user already exists)
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
-                    # Fetch the existing record
+                    # Fetch the existing record by email
                     m = db.one("select * from members where email=%s and org_id=%s", (email, oid))
                     if m and not m["user_id"]:
                         # Link the existing pending record
                         db.run("update members set user_id=%s where id=%s", (sub, m["id"]))
                         audit(db, oid, sub, "member.join", "member", m["id"])
-                    elif m:
-                        # User already exists and is linked
+                    elif m and m["user_id"]:
+                        # User already exists with a different user_id - this shouldn't happen with unique(email, org_id)
+                        # Return the existing user's role
                         pass
                     else:
                         raise
