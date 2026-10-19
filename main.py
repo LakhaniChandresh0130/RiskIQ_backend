@@ -93,7 +93,8 @@ def auth(authorization: str = Header(None)):
         except Exception as e:
             err_msg = f"{type(e).__name__}: {str(e)}"
             raise HTTPException(401, f"Invalid or expired token: {err_msg}")
-    else: sub, email = "demo-user", "demo@local"             # open demo mode
+    else:
+        raise HTTPException(503, "Supabase authentication not configured. Please set SUPABASE_URL and SUPABASE_JWT_SECRET environment variables.")
     hit = _uc.get(sub)
     if hit and time.time() - hit[0] < 30: return hit[1]
     try:
@@ -118,7 +119,7 @@ def me(u=Depends(auth)):
 
 # ---------------------------------------------------------------- portfolios
 @app.get("/api/portfolios")
-def plist(admin_id: str = None, u=Depends(need("read"))): return [{"id": "demo", "name": "Demo book (12 positions)", "n_positions": 12, "source": "demo"}] + repo.list_portfolios(DBH, u["org"], user_id=u["sub"], role=u["role"], filter_admin_id=admin_id)
+def plist(admin_id: str = None, u=Depends(need("read"))): return repo.list_portfolios(DBH, u["org"], user_id=u["sub"], role=u["role"], filter_admin_id=admin_id)
 
 @app.post("/api/portfolios")
 async def upload(request: Request, name: str = "My portfolio", filename: str = "upload.csv", telegram_bot_token: str = "", telegram_chat_id: str = "", u=Depends(need("write"))):
@@ -139,9 +140,7 @@ async def analyze_once(request: Request, filename: str = "upload.csv", u=Depends
     repo.audit(DBH, u["org"], u["sub"], "analyze.once", "upload", "", {"rows": rep["rows_ok"]})
     return {**snap, "portfolio": "Uploaded file (not saved)", "report": rep}
 
-@app.post("/api/portfolios/demo-large")
-def big(n: int = 5000, telegram_bot_token: str = "", telegram_chat_id: str = "", u=Depends(need("write"))):
-    rows = E.demo_large(min(max(n, 100), 100000)); return {"id": repo.create_portfolio(DBH, u["org"], u["sub"], f"Generated book ({len(rows):,} positions)", rows, "generated", telegram_bot_token or None, telegram_chat_id or None), "report": {"rows_ok": len(rows)}}
+
 
 @app.post("/api/portfolios/{pid}/delete")
 def delete(pid: str, u=Depends(need("write"))): repo.delete_portfolio(DBH, u["org"], u["sub"], pid, role=u["role"]); SVC.cache.clear(); return {"ok": True}
@@ -175,7 +174,7 @@ class Shock(BaseModel):
     eq_in: float = 0; eq_gl: float = 0; fx: float = 0; dy: float = 0; comm: float = 0
 
 @app.post("/api/stress/custom")
-def custom(b: Shock, portfolio: str = "demo", u=Depends(need("read"))): return E.run_scenario("Custom", b.model_dump(), SVC.analysis(u["org"], portfolio)[0][1])
+def custom(b: Shock, portfolio: str, u=Depends(need("read"))): return E.run_scenario("Custom", b.model_dump(), SVC.analysis(u["org"], portfolio)[0][1])
 
 # ---------------------------------------------------------------- governance
 @app.get("/api/alerts")
@@ -187,7 +186,7 @@ def resolve(aid: str, u=Depends(need("write"))): repo.act_alert(DBH, u["org"], a
 
 class LimitIn(BaseModel): portfolio: str; warn: float; crit: float
 @app.get("/api/limits")
-def limits(portfolio: str = "demo", u=Depends(need("read"))): return {"active": repo.active_limits(DBH, u["org"], portfolio, E.LIMITS), "rows": repo.list_limits(DBH, u["org"], portfolio)}
+def limits(portfolio: str, u=Depends(need("read"))): return {"active": repo.active_limits(DBH, u["org"], portfolio, E.LIMITS), "rows": repo.list_limits(DBH, u["org"], portfolio)}
 @app.post("/api/limits")
 def propose_limits(b: LimitIn, u=Depends(need("write"))): return {"id": repo.propose_limits(DBH, u["org"], b.portfolio, b.warn, b.crit, u["sub"])}
 @app.post("/api/limits/{lid}/approve")
@@ -254,7 +253,7 @@ def rule_chat(msg, s):
     p = s["methods"]["parametric"]
     return f"Exposure {cr(s['nav'])}. 1-day 99% VaR {cr(p['var'])} ({p['var']/s['nav']*100:.2f}%), ES {cr(p['es'])}. Backtest: {s['backtest']['breaches']} breaches in 250 days ({s['backtest']['zone']}).", ["get_risk_summary"]
 
-class Chat(BaseModel): message: str; portfolio: str = "demo"
+class Chat(BaseModel): message: str; portfolio: str
 @app.post("/api/agent/chat")
 def chat(b: Chat, u=Depends(need("read"))):
     s = SVC.snapshot(u["org"], b.portfolio); steps = []
