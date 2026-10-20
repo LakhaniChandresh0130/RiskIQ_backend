@@ -14,6 +14,42 @@ import engine as E, ingest, connectors, repo, reports, llm, providers
 from db import DB
 from service import Service, NotFound
 
+# Environment variable validation
+REQUIRED_ENV_VARS = ['DATABASE_URL', 'SUPABASE_URL', 'SUPABASE_JWT_SECRET']
+OPTIONAL_ENV_VARS = ['GROQ_API_KEY', 'GROQ_MODEL', 'CORS_ORIGINS', 'SCHEDULER']
+
+def validate_environment():
+    """Validate that required environment variables are set."""
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        raise EnvironmentError(
+            f"Missing required environment variables: {', '.join(missing)}. "
+            f"Please set them in your .env file or deployment configuration."
+        )
+
+    # Validate DATABASE_URL format
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url.startswith('postgresql://'):
+        raise EnvironmentError(
+            f"DATABASE_URL must start with 'postgresql://'. Got: {db_url[:20]}..."
+        )
+
+    # Validate SUPABASE_URL format
+    supabase_url = os.getenv('SUPABASE_URL')
+    if not supabase_url.startswith('https://'):
+        raise EnvironmentError(
+            f"SUPABASE_URL must start with 'https://'. Got: {supabase_url[:20]}..."
+        )
+
+    # Set defaults for optional variables
+    if not os.getenv('CORS_ORIGINS'):
+        os.environ['CORS_ORIGINS'] = '*'
+    if not os.getenv('GROQ_MODEL'):
+        os.environ['GROQ_MODEL'] = 'llama-3.3-70b-versatile'
+    if not os.getenv('SCHEDULER'):
+        os.environ['SCHEDULER'] = '0'
+
+validate_environment()
 DBH = DB(); SVC = Service(DBH)
 
 @asynccontextmanager
@@ -110,7 +146,37 @@ def need(perm):
     return dep
 
 @app.get("/api/health")
-def health(): return {"ok": True, "llm": llm.provider() or "rule-based"}
+def health():
+    """Basic health check endpoint."""
+    return {
+        "ok": True,
+        "llm": llm.provider() or "rule-based",
+        "timestamp": time.time()
+    }
+
+@app.get("/api/health/detailed")
+def health_detailed():
+    """Detailed health check with database and service status."""
+    try:
+        # Test database connection
+        db_healthy = DBH.test_connection() if hasattr(DBH, 'test_connection') else True
+    except Exception as e:
+        db_healthy = False
+
+    return {
+        "status": "healthy" if db_healthy else "degraded",
+        "timestamp": time.time(),
+        "services": {
+            "database": "ok" if db_healthy else "error",
+            "llm": llm.provider() or "rule-based",
+            "scheduler": "enabled" if os.getenv("SCHEDULER") == "1" else "disabled"
+        },
+        "environment": {
+            "supabase_configured": bool(os.getenv("SUPABASE_URL")),
+            "groq_configured": bool(os.getenv("GROQ_API_KEY")),
+            "cors_origins": os.getenv("CORS_ORIGINS", "*")
+        }
+    }
 @app.get("/api/fx")
 def fx(): return providers.display_rates()               # INR -> currency table for the display-currency selector
 @app.get("/api/me")

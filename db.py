@@ -82,3 +82,14 @@ class DB:
             return r[0] if r else None
         except Exception as e:
             return None
+
+    def test_connection(s):
+        """Test database connection."""
+        if not s.url:
+            return False
+        try:
+            with s.tx() as cur:
+                cur.execute("SELECT 1")
+                return True
+        except Exception as e:
+            return False
