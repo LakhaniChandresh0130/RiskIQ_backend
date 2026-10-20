@@ -16,6 +16,11 @@ def list_audit(db, org, limit=300):
 # ---- identity
 def resolve_user(db, sub, email):
     """First sign-in: join a pending invite by email, else create a pending member record. First user of org becomes super_admin."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"resolve_user called - sub: {sub}, email: {email}")
+
     m = db.one("select * from members where user_id=%s", (sub,))
     if not m and email:
         # Check by email for pending invites (user_id is null) only
@@ -24,21 +29,30 @@ def resolve_user(db, sub, email):
             # Link the pending invite to this user
             db.run("update members set user_id=%s where id=%s", (sub, m["id"]))
             audit(db, m["org_id"], sub, "member.join", "member", m["id"])
+            logger.info(f"Linked pending invite for {email} to user {sub}")
     if not m:
         # Check if this organization exists or if any member exists
         has_any_member = db.one("select 1 as x from members limit 1")
         if not has_any_member:
             # Very first user of the entire system/org becomes super_admin
-            oid = uid(); db.run("insert into orgs values(%s,%s,%s)", (oid, f"{email or sub} organisation", now()))
-            m = dict(id=uid(), org_id=oid, role="super_admin"); db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (m["id"], oid, sub, email, "super_admin", now())); audit(db, oid, sub, "org.create", "org", oid)
+            oid = uid()
+            org_name = f"{email or sub} organisation"
+            db.run("insert into orgs values(%s,%s,%s)", (oid, org_name, now()))
+            m = dict(id=uid(), org_id=oid, role="super_admin")
+            db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (m["id"], oid, sub, email, "super_admin", now()))
+            audit(db, oid, sub, "org.create", "org", oid)
+            logger.info(f"Created first org and super_admin: {email}")
         else:
             first_org = db.one("select id from orgs order by created_at asc limit 1")
             oid = first_org["id"] if first_org else uid()
             # New user has no role assigned -> requires approval
             mid = uid()
             try:
-                db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (mid, oid, sub, email, None, now()))
+                # If email is None, use a placeholder to avoid NULL constraint issues
+                email_to_store = email if email else f"pending-{sub[:8]}"
+                db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (mid, oid, sub, email_to_store, None, now()))
                 m = dict(id=mid, org_id=oid, role=None)
+                logger.info(f"Created pending member for {email_to_store} (user_id: {sub})")
             except Exception as e:
                 # Handle duplicate insertion (race condition or user already exists)
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
@@ -48,16 +62,22 @@ def resolve_user(db, sub, email):
                         # Link the existing pending record
                         db.run("update members set user_id=%s where id=%s", (sub, m["id"]))
                         audit(db, oid, sub, "member.join", "member", m["id"])
+                        logger.info(f"Linked existing pending record for {email}")
                     elif m and m["user_id"]:
                         # User already exists with a different user_id - this shouldn't happen with unique(email, org_id)
                         # Return the existing user's role
+                        logger.warning(f"User {sub} already exists with different user_id")
                         pass
                     else:
                         raise
                 else:
+                    logger.error(f"Error creating member: {e}")
                     raise
     # Return role as None if not assigned - this will trigger pending approval screen
-    return {"sub": sub, "email": email, "org": m["org_id"], "role": m.get("role")}
+    # Use the email from the member record if available, otherwise use the provided email
+    actual_email = m.get("email") if m else email
+    logger.info(f"Returning user - sub: {sub}, email: {actual_email}, role: {m.get('role') if m else None}")
+    return {"sub": sub, "email": actual_email, "org": m["org_id"], "role": m.get("role")}
 def list_members(db, org): return db.all("select id,user_id,email,role,created_at from members where org_id=%s order by created_at", (org,))
 def invite(db, org, email, role, by):
     if role not in ROLES: raise ValueError("Unknown role")

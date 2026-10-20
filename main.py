@@ -124,6 +124,19 @@ def auth(authorization: str = Header(None)):
                 raise HTTPException(401, "Invalid or missing token")
             c = _claims(token)
             sub, email = c["sub"], c.get("email")
+
+            # Log for debugging (remove in production)
+            import logging
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger(__name__)
+            logger.info(f"Auth request - sub: {sub}, email: {email}, claims keys: {list(c.keys())}")
+
+            # If email is not in JWT, try to get it from user metadata
+            if not email and "user_metadata" in c:
+                email = c["user_metadata"].get("email")
+
+            if not email:
+                logger.warning(f"No email found in JWT for user {sub}. Claims: {c}")
         except HTTPException:
             raise
         except Exception as e:
@@ -137,6 +150,9 @@ def auth(authorization: str = Header(None)):
         u = repo.resolve_user(DBH, sub, email); _uc[sub] = (time.time(), u); return u
     except Exception as e:
         # If database connection fails, don't silently assign roles — raise a clear error
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error resolving user {sub}: {e}", exc_info=True)
         raise HTTPException(503, f"Database temporarily unavailable. Please try again in a moment.")
 
 def need(perm):
