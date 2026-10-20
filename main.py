@@ -96,7 +96,7 @@ def auth(authorization: str = Header(None)):
     else:
         raise HTTPException(503, "Supabase authentication not configured. Please set SUPABASE_URL and SUPABASE_JWT_SECRET environment variables.")
     hit = _uc.get(sub)
-    if hit and time.time() - hit[0] < 30: return hit[1]
+    if hit and time.time() - hit[0] < 5: return hit[1]  # Reduced cache from 30s to 5s
     try:
         u = repo.resolve_user(DBH, sub, email); _uc[sub] = (time.time(), u); return u
     except Exception as e:
