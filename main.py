@@ -64,9 +64,20 @@ async def lifespan(app):
     yield
     if sch: sch.shutdown()
 
+cors_env = os.getenv("CORS_ORIGINS", "*")
+cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+if "*" not in cors_origins:
+    cors_origins.append("https://riskiq-fromntend.netlify.app")
+
 app = FastAPI(title="RiskIQ API", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("CORS_ORIGINS", "*").split(","), allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_origin_regex=r"https://.*\.netlify\.app",
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
 @app.exception_handler(NotFound)
 async def _nf(r, e): return JSONResponse({"detail": str(e)}, 404)
@@ -170,6 +181,14 @@ def health():
         "timestamp": time.time()
     }
 
+@app.get("/api/me")
+def me(u=Depends(auth)):
+    """Get current user information."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"/me endpoint called - returning user: {u}")
+    return u
+
 @app.get("/api/health/detailed")
 def health_detailed():
     """Detailed health check with database and service status."""
@@ -195,9 +214,6 @@ def health_detailed():
     }
 @app.get("/api/fx")
 def fx(): return providers.display_rates()               # INR -> currency table for the display-currency selector
-@app.get("/api/me")
-def me(u=Depends(auth)): 
-    return u
 
 # ---------------------------------------------------------------- portfolios
 @app.get("/api/portfolios")
