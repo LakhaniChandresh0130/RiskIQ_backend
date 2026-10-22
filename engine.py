@@ -62,35 +62,61 @@ def _vb(k, cls):
 def _synth(k, cls, sector):
     vol, beta = _vb(k, cls); rng = np.random.default_rng(zlib.crc32(k.encode()))
     return pd.Series(beta * _market() + _sec(sector) + rng.standard_normal(len(_index())) * vol * .6, index=_index())
-def _fetch_live(keys):
+def _fetch_live(keys, max_keys=35, timeout_sec=2.5):
     global _LIVE
-    if not _LIVE: return
+    if not _LIVE or not keys: return
     try:
-        import tempfile, logging
+        import tempfile, logging, concurrent.futures
         from pathlib import Path
         import yfinance as yf
         logging.getLogger("yfinance").setLevel(logging.ERROR)
         tz_dir = Path(tempfile.gettempdir()) / "py-yfinance-tz"
         tz_dir.mkdir(parents=True, exist_ok=True)
-        yf.set_tz_cache_location(str(tz_dir))
-        for i in range(0, len(keys), 100):
-            b = keys[i:i + 100]; px = yf.download(b, period="4y", auto_adjust=True, progress=False)["Close"]
-            if isinstance(px, pd.Series): px = px.to_frame(b[0])
-            for k in px.columns:
-                s = px[k].dropna()
-                if len(s) > 500:
-                    r = np.log(s / s.shift(1)).dropna(); r.index = pd.DatetimeIndex(r.index).tz_localize(None)
-                    _RAW[k] = r[~r.index.duplicated()].reindex(_index()).fillna(0); _SRC[k] = "live"
+        try:
+            yf.set_tz_cache_location(str(tz_dir))
+        except Exception:
+            pass
+
+        # Prioritize top holdings and cap count to ensure <5s performance
+        target_keys = list(keys)[:max_keys]
+        if not target_keys: return
+
+        def _do_download():
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return yf.download(target_keys, period="2y", auto_adjust=True, progress=False, threads=True, timeout=2.0)["Close"]
+
+        # Hard deadline: abort network wait if it exceeds timeout_sec
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_do_download)
+            px = fut.result(timeout=timeout_sec)
+
+        if isinstance(px, pd.Series): px = px.to_frame(target_keys[0])
+        idx = _index()
+        for k in px.columns:
+            s = px[k].dropna()
+            if len(s) > 200:
+                r = np.log(s / s.shift(1)).dropna()
+                r.index = pd.DatetimeIndex(r.index).tz_localize(None)
+                _RAW[k] = r[~r.index.duplicated()].reindex(idx).fillna(0)
+                _SRC[k] = "live"
     except Exception as e:
-        logging.getLogger(__name__).warning("live data unavailable, using proxies: %s", e)
-        _LIVE = False
+        logging.getLogger(__name__).debug("Live data timeout or unavailable (%s), using factor proxies", e)
 
 def returns_for(agg):
-    keys = list(agg["yf"]); need = [k for k in keys + [FX] if k not in _RAW]
-    if need and os.getenv("DATA_MODE", "auto") != "synthetic": _fetch_live(need)
+    keys = list(agg["yf"])
+    need = [k for k in keys + [FX] if k not in _RAW]
+    mode = os.getenv("DATA_MODE", "auto").lower()
+    if need and mode != "synthetic":
+        val_map = dict(zip(agg["yf"], agg["value"].abs()))
+        sorted_need = sorted(need, key=lambda k: val_map.get(k, 0), reverse=True)
+        _fetch_live(sorted_need, max_keys=35, timeout_sec=2.5)
+
     meta = {r.yf: (r.cls, r.sector) for r in agg.itertuples()}
     for k in need:
-        if k not in _RAW: _RAW[k] = _synth(k, *meta.get(k, ("FX", "FX"))); _SRC[k] = "proxy"
+        if k not in _RAW:
+            _RAW[k] = _synth(k, *meta.get(k, ("FX", "FX")))
+            _SRC[k] = "proxy"
     X = np.column_stack([_RAW[k].values for k in keys])
     X[:, ((agg["ccy"] == "USD") & (agg["cls"] != "FX")).values] += _RAW[FX].values[:, None]   # USD assets carry USDINR risk too
     return pd.DataFrame(X, index=_index(), columns=keys)

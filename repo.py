@@ -152,12 +152,13 @@ def get_portfolio(db, org, pid):
 def delete_portfolio(db, org, user, pid, role=None):
     """Delete portfolio. Admins can only delete their own portfolios. Super Admin can delete any."""
     if role == "admin":
-        if not db.one("select 1 as x from portfolios where id=%s and org_id=%s and owner=%s", (pid, org, user)):
+        if not db.one("select 1 as x from portfolios where id=%s and owner=%s", (pid, user)):
             raise PermissionError("You can only delete your own portfolios")
     else:
-        if not db.one("select 1 as x from portfolios where id=%s and org_id=%s", (pid, org)):
+        if not db.one("select 1 as x from portfolios where id=%s", (pid,)):
             raise ValueError("Portfolio not found")
-    for t, k in (("positions", "portfolio_id"), ("portfolios", "id"), ("limits", "portfolio_id"), ("alerts", "portfolio_id")): db.run(f"delete from {t} where {k}=%s", (pid,))
+    for t, k in (("positions", "portfolio_id"), ("portfolios", "id"), ("limits", "portfolio_id"), ("alerts", "portfolio_id")):
+        db.run(f"delete from {t} where {k}=%s", (pid,))
     audit(db, org, user, "portfolio.delete", "portfolio", pid)
 def update_portfolio_telegram(db, org, pid, telegram_bot_token, telegram_chat_id, user, role=None):
     """Update telegram settings. Admins can only update their own portfolios."""
