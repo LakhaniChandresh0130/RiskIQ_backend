@@ -1,5 +1,5 @@
 """RiskIQ engine v2. Works for any portfolio. No NxN matrices are built, so cost is O(days x instruments)."""
-import os, time, zlib
+import os, time, zlib, logging
 import numpy as np, pandas as pd
 from scipy.stats import norm, chi2
 
@@ -66,7 +66,13 @@ def _fetch_live(keys):
     global _LIVE
     if not _LIVE: return
     try:
+        import tempfile, logging
+        from pathlib import Path
         import yfinance as yf
+        logging.getLogger("yfinance").setLevel(logging.ERROR)
+        tz_dir = Path(tempfile.gettempdir()) / "py-yfinance-tz"
+        tz_dir.mkdir(parents=True, exist_ok=True)
+        yf.set_tz_cache_location(str(tz_dir))
         for i in range(0, len(keys), 100):
             b = keys[i:i + 100]; px = yf.download(b, period="4y", auto_adjust=True, progress=False)["Close"]
             if isinstance(px, pd.Series): px = px.to_frame(b[0])
@@ -76,7 +82,8 @@ def _fetch_live(keys):
                     r = np.log(s / s.shift(1)).dropna(); r.index = pd.DatetimeIndex(r.index).tz_localize(None)
                     _RAW[k] = r[~r.index.duplicated()].reindex(_index()).fillna(0); _SRC[k] = "live"
     except Exception as e:
-        print("live data unavailable, using proxies:", e); _LIVE = False
+        logging.getLogger(__name__).warning("live data unavailable, using proxies: %s", e)
+        _LIVE = False
 
 def returns_for(agg):
     keys = list(agg["yf"]); need = [k for k in keys + [FX] if k not in _RAW]

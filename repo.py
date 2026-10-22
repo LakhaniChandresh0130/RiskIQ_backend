@@ -19,7 +19,7 @@ def resolve_user(db, sub, email):
     import logging
     logger = logging.getLogger(__name__)
 
-    logger.info(f"resolve_user called - sub: {sub}, email: {email}")
+    logger.debug("resolve_user sub=%s", sub)
 
     m = db.one("select * from members where user_id=%s", (sub,))
     if not m and email:
@@ -32,7 +32,7 @@ def resolve_user(db, sub, email):
                 if old_sub:
                     db.run("update portfolios set owner=%s where owner=%s", (sub, old_sub))
                 audit(db, m["org_id"], sub, "member.join", "member", m["id"])
-                logger.info(f"Linked existing member for {email} to user {sub}")
+                logger.debug("Linked existing member for %s to user %s", email, sub)
     if not m:
         # Check if this organization exists or if any member exists
         has_any_member = db.one("select 1 as x from members limit 1")
@@ -44,7 +44,7 @@ def resolve_user(db, sub, email):
             m = dict(id=uid(), org_id=oid, role="super_admin")
             db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (m["id"], oid, sub, email, "super_admin", now()))
             audit(db, oid, sub, "org.create", "org", oid)
-            logger.info(f"Created first org and super_admin: {email}")
+            logger.debug("Created first org and super_admin: %s", email)
         else:
             first_org = db.one("select id from orgs order by created_at asc limit 1")
             oid = first_org["id"] if first_org else uid()
@@ -55,7 +55,7 @@ def resolve_user(db, sub, email):
                 email_to_store = email if email else f"pending-{sub[:8]}"
                 db.run("insert into members values(%s,%s,%s,%s,%s,%s)", (mid, oid, sub, email_to_store, None, now()))
                 m = dict(id=mid, org_id=oid, role=None)
-                logger.info(f"Created pending member for {email_to_store} (user_id: {sub})")
+                logger.debug("Created pending member for %s", email_to_store)
             except Exception as e:
                 # Handle duplicate insertion (race condition or user already exists)
                 if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
@@ -66,14 +66,14 @@ def resolve_user(db, sub, email):
                         db.run("update members set user_id=%s where id=%s", (sub, m["id"]))
                         if old_sub:
                             db.run("update portfolios set owner=%s where owner=%s", (sub, old_sub))
-                        logger.info(f"Updated user_id to {sub} for existing member {email}")
+                        logger.debug("Updated user_id for existing member %s", email)
                 else:
                     logger.error(f"Error creating member: {e}")
                     raise
     # Return role as None if not assigned - this will trigger pending approval screen
     # Use the email from the member record if available, otherwise use the provided email
     actual_email = m.get("email") if m else email
-    logger.info(f"Returning user - sub: {sub}, email: {actual_email}, role: {m.get('role') if m else None}")
+    logger.debug("Resolved user sub=%s role=%s", sub, m.get("role") if m else None)
     return {"sub": sub, "email": actual_email, "org": m["org_id"], "role": m.get("role")}
 def list_members(db, org):
     res = db.all("select id,user_id,email,role,created_at,org_id from members where org_id=%s order by created_at", (org,))

@@ -2,8 +2,48 @@ try:
     from dotenv import load_dotenv; load_dotenv()
 except ImportError: pass
 
-import os, time, json
+import os, time, json, logging, tempfile, re
 from contextlib import asynccontextmanager
+
+def _is_prod():
+    return os.getenv("RENDER") == "true" or os.getenv("ENV", "").lower() in ("production", "prod")
+
+class _AccessFilter(logging.Filter):
+    """Drop health probes, CORS preflights, and (in production) successful access lines."""
+    _status = re.compile(r'"\s(\d{3})\s')
+
+    def filter(self, record):
+        msg = record.getMessage()
+        if "OPTIONS " in msg or "/api/health" in msg:
+            return False
+        if _is_prod():
+            m = self._status.search(msg)
+            return bool(m and int(m.group(1)) >= 400)
+        return True
+
+def configure_logging():
+    level_name = os.getenv("LOG_LEVEL")
+    if not level_name:
+        level_name = "WARNING" if _is_prod() else "INFO"
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(levelname)s:%(name)s:%(message)s")
+    logging.getLogger("yfinance").setLevel(logging.ERROR)
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessFilter) for f in access.filters):
+        access.addFilter(_AccessFilter())
+    if _is_prod() and not os.getenv("ACCESS_LOG"):
+        access.setLevel(logging.WARNING)
+    tz_dir = os.path.join(tempfile.gettempdir(), "py-yfinance-tz")
+    os.makedirs(tz_dir, exist_ok=True)
+    os.environ.setdefault("XDG_CACHE_HOME", tempfile.gettempdir())
+    try:
+        import yfinance as yf
+        yf.set_tz_cache_location(tz_dir)
+    except Exception:
+        pass
+
+configure_logging()
+logger = logging.getLogger(__name__)
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -54,6 +94,7 @@ DBH = DB(); SVC = Service(DBH)
 
 @asynccontextmanager
 async def lifespan(app):
+    configure_logging()
     sch = None
     if os.getenv("SCHEDULER") == "1":                         # set SCHEDULER=1 on exactly one backend instance
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -135,12 +176,7 @@ def auth(authorization: str = Header(None)):
                 raise HTTPException(401, "Invalid or missing token")
             c = _claims(token)
             sub, email = c["sub"], c.get("email")
-
-            # Log for debugging (remove in production)
-            import logging
-            logging.basicConfig(level=logging.INFO)
-            logger = logging.getLogger(__name__)
-            logger.info(f"Auth request - sub: {sub}, email: {email}, claims keys: {list(c.keys())}")
+            logger.debug("Auth request sub=%s", sub)
 
             # If email is not in JWT, try to get it from user metadata
             if not email and "user_metadata" in c:
@@ -161,9 +197,7 @@ def auth(authorization: str = Header(None)):
         u = repo.resolve_user(DBH, sub, email); _uc[sub] = (time.time(), u); return u
     except Exception as e:
         # If database connection fails, don't silently assign roles — raise a clear error
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error resolving user {sub}: {e}", exc_info=True)
+        logger.error("Error resolving user %s: %s", sub, e, exc_info=True)
         raise HTTPException(503, f"Database temporarily unavailable. Please try again in a moment.")
 
 def need(perm):
@@ -184,9 +218,6 @@ def health():
 @app.get("/api/me")
 def me(u=Depends(auth)):
     """Get current user information."""
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(f"/me endpoint called - returning user: {u}")
     return u
 
 @app.get("/api/health/detailed")
