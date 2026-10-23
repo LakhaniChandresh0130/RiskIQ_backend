@@ -292,7 +292,7 @@ def update_telegram(pid: str, b: TelegramSettings, u=Depends(need("write"))):
     return {"ok": True}
 
 @app.get("/api/portfolios/{pid}/snapshot")
-def snapshot(pid: str, u=Depends(need("read"))): return SVC.snapshot(u["org"], pid)
+def snapshot(pid: str, refresh: bool = False, u=Depends(need("read"))): return SVC.snapshot(u["org"], pid, force=refresh)
 
 @app.get("/api/portfolios/{pid}/report.xlsx")
 def report(pid: str, u=Depends(need("read"))):
