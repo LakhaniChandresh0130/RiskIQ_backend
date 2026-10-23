@@ -256,7 +256,10 @@ async def upload(request: Request, name: str = "My portfolio", filename: str = "
     try: rows, rep = await run_in_threadpool(ingest.parse, body, filename, fx)
     except Exception as e: raise HTTPException(400, f"Could not read file: {e}")
     if not rows: raise HTTPException(400, "No valid rows. " + (rep["errors"][0]["error"] if rep["errors"] else ""))
-    return {"id": await run_in_threadpool(repo.create_portfolio, DBH, u["org"], u["sub"], name, rows, "upload", telegram_bot_token or None, telegram_chat_id or None), "report": rep}
+    pid = await run_in_threadpool(repo.create_portfolio, DBH, u["org"], u["sub"], name, rows, "upload", telegram_bot_token or None, telegram_chat_id or None)
+    try: await run_in_threadpool(SVC.analysis, u["org"], pid)
+    except Exception: pass
+    return {"id": pid, "report": rep}
 
 @app.post("/api/analyze-once")
 async def analyze_once(request: Request, filename: str = "upload.csv", u=Depends(need("read"))):

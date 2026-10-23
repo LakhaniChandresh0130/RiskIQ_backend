@@ -1,5 +1,6 @@
 """RiskIQ engine v2. Works for any portfolio. No NxN matrices are built, so cost is O(days x instruments)."""
-import os, time, zlib, logging
+import os, time, zlib, logging, tempfile, threading, re, pickle
+from pathlib import Path
 import numpy as np, pandas as pd
 from scipy.stats import norm, chi2
 
@@ -41,6 +42,43 @@ def demo_large(n=5000, m=400, seed=1):
 
 # ------------------------------------------------------------------ market data (cached per instrument)
 _RAW, _SRC, _SEC, _M, _IDX, _LIVE = {}, {}, {}, None, None, True
+_CACHE_FILE = Path(tempfile.gettempdir()) / "riskiq_market_cache_v2.pkl"
+_CIRCUIT_FAIL_COUNT = 0
+_CIRCUIT_COOLDOWN_UNTIL = 0
+_VALID_TICKER_RE = re.compile(r'^[A-Z0-9\.\-\=]+$')
+
+def _is_valid_live_ticker(yf_symbol, cls):
+    if cls != "Equity":
+        return False
+    if not yf_symbol or " " in yf_symbol or len(yf_symbol) > 15:
+        return False
+    if yf_symbol.startswith(("BND", "CMD", "IN0", "US0")):
+        return False
+    if any(yf_symbol.startswith(fx) for fx in ("USD", "EUR", "GBP", "JPY")) and yf_symbol.endswith((".NS", ".BO")):
+        return False
+    return bool(_VALID_TICKER_RE.match(yf_symbol))
+
+def _load_disk_cache():
+    global _RAW, _SRC
+    try:
+        if _CACHE_FILE.exists():
+            with open(_CACHE_FILE, "rb") as f:
+                data = pickle.load(f)
+            if time.time() - data.get("ts", 0) < 43200 and data.get("raw"):
+                _RAW.update(data["raw"])
+                _SRC.update(data.get("src", {}))
+    except Exception:
+        pass
+
+def _save_disk_cache():
+    try:
+        with open(_CACHE_FILE, "wb") as f:
+            pickle.dump({"raw": _RAW, "src": _SRC, "ts": time.time()}, f)
+    except Exception:
+        pass
+
+_load_disk_cache()
+
 def _index():
     global _IDX
     if _IDX is None: _IDX = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=750)
@@ -62,12 +100,15 @@ def _vb(k, cls):
 def _synth(k, cls, sector):
     vol, beta = _vb(k, cls); rng = np.random.default_rng(zlib.crc32(k.encode()))
     return pd.Series(beta * _market() + _sec(sector) + rng.standard_normal(len(_index())) * vol * .6, index=_index())
-def _fetch_live(keys, max_keys=35, timeout_sec=2.5):
-    global _LIVE
+
+def _fetch_live(keys, max_keys=10, timeout_sec=1.5, agg_meta=None):
+    global _LIVE, _CIRCUIT_FAIL_COUNT, _CIRCUIT_COOLDOWN_UNTIL
     if not _LIVE or not keys: return
+    now = time.time()
+    if now < _CIRCUIT_COOLDOWN_UNTIL:
+        return
+
     try:
-        import tempfile, logging, concurrent.futures
-        from pathlib import Path
         import yfinance as yf
         logging.getLogger("yfinance").setLevel(logging.ERROR)
         tz_dir = Path(tempfile.gettempdir()) / "py-yfinance-tz"
@@ -77,46 +118,73 @@ def _fetch_live(keys, max_keys=35, timeout_sec=2.5):
         except Exception:
             pass
 
-        # Prioritize top holdings and cap count to ensure <5s performance
-        target_keys = list(keys)[:max_keys]
+        # Strictly filter clean, valid equity tickers to prevent 404 stalls
+        if agg_meta:
+            clean = [k for k in keys if _is_valid_live_ticker(k, agg_meta.get(k, ("Equity", ""))[0])]
+        else:
+            clean = [k for k in keys if " " not in k and _VALID_TICKER_RE.match(k)]
+
+        target_keys = clean[:max_keys]
         if not target_keys: return
 
+        result_holder = []
         def _do_download():
             import io, contextlib
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return yf.download(target_keys, period="2y", auto_adjust=True, progress=False, threads=True, timeout=2.0)["Close"]
+                px = yf.download(target_keys, period="2y", auto_adjust=True, progress=False, threads=True, timeout=1.5)
+                if px is not None and not px.empty and "Close" in px:
+                    result_holder.append(px["Close"])
 
-        # Hard deadline: abort network wait if it exceeds timeout_sec
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_do_download)
-            px = fut.result(timeout=timeout_sec)
+        # Daemon thread with strict join timeout: will NEVER block process shutdown or freeze requests
+        th = threading.Thread(target=_do_download, daemon=True)
+        th.start()
+        th.join(timeout=timeout_sec)
 
-        if isinstance(px, pd.Series): px = px.to_frame(target_keys[0])
-        idx = _index()
-        for k in px.columns:
-            s = px[k].dropna()
-            if len(s) > 200:
-                r = np.log(s / s.shift(1)).dropna()
-                r.index = pd.DatetimeIndex(r.index).tz_localize(None)
-                _RAW[k] = r[~r.index.duplicated()].reindex(idx).fillna(0)
-                _SRC[k] = "live"
+        if not th.is_alive() and result_holder:
+            px = result_holder[0]
+            if isinstance(px, pd.Series): px = px.to_frame(target_keys[0])
+            idx = _index()
+            loaded = 0
+            for k in px.columns:
+                s = px[k].dropna()
+                if len(s) > 200:
+                    r = np.log(s / s.shift(1)).dropna()
+                    r.index = pd.DatetimeIndex(r.index).tz_localize(None)
+                    _RAW[k] = r[~r.index.duplicated()].reindex(idx).fillna(0)
+                    _SRC[k] = "live"
+                    loaded += 1
+            if loaded > 0:
+                _CIRCUIT_FAIL_COUNT = 0
+                return
+
+        _CIRCUIT_FAIL_COUNT += 1
+        if _CIRCUIT_FAIL_COUNT >= 2:
+            _CIRCUIT_COOLDOWN_UNTIL = time.time() + 300
     except Exception as e:
+        _CIRCUIT_FAIL_COUNT += 1
+        if _CIRCUIT_FAIL_COUNT >= 2:
+            _CIRCUIT_COOLDOWN_UNTIL = time.time() + 300
         logging.getLogger(__name__).debug("Live data timeout or unavailable (%s), using factor proxies", e)
 
 def returns_for(agg):
     keys = list(agg["yf"])
     need = [k for k in keys + [FX] if k not in _RAW]
+    meta = {r.yf: (r.cls, r.sector) for r in agg.itertuples()}
     mode = os.getenv("DATA_MODE", "auto").lower()
     if need and mode != "synthetic":
         val_map = dict(zip(agg["yf"], agg["value"].abs()))
         sorted_need = sorted(need, key=lambda k: val_map.get(k, 0), reverse=True)
-        _fetch_live(sorted_need, max_keys=35, timeout_sec=2.5)
+        _fetch_live(sorted_need, max_keys=10, timeout_sec=1.5, agg_meta=meta)
 
-    meta = {r.yf: (r.cls, r.sector) for r in agg.itertuples()}
+    new_added = False
     for k in need:
         if k not in _RAW:
             _RAW[k] = _synth(k, *meta.get(k, ("FX", "FX")))
             _SRC[k] = "proxy"
+            new_added = True
+    if new_added:
+        _save_disk_cache()
+
     X = np.column_stack([_RAW[k].values for k in keys])
     X[:, ((agg["ccy"] == "USD") & (agg["cls"] != "FX")).values] += _RAW[FX].values[:, None]   # USD assets carry USDINR risk too
     return pd.DataFrame(X, index=_index(), columns=keys)

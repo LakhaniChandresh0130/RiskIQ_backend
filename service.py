@@ -15,10 +15,9 @@ class Service:
         if key not in s.cache:
             if len(s.cache) > 64: s.cache.pop(next(iter(s.cache)))
             s.cache[key] = E.analyze(pos, lim, extra)
-            # Get portfolio-specific Telegram credentials
-            telegram_creds = repo.get_portfolio_telegram(s.db, org, pid)
-            telegram_bot_token = telegram_creds["telegram_bot_token"] if telegram_creds else None
-            telegram_chat_id = telegram_creds["telegram_chat_id"] if telegram_creds else None
+            # Get portfolio-specific Telegram credentials from meta directly
+            telegram_bot_token = meta.get("telegram_bot_token")
+            telegram_chat_id = meta.get("telegram_chat_id")
             notify.send_all(repo.sync_alerts(s.db, org, pid, s.cache[key][0]["alerts"]), meta["name"], telegram_bot_token, telegram_chat_id)
         return s.cache[key], meta
     def snapshot(s, org, pid):

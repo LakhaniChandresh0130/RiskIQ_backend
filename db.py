@@ -1,9 +1,12 @@
 """DB layer for Supabase PostgreSQL only. Uses %s placeholders and PostgreSQL-specific types."""
-import os, contextlib
+import os, contextlib, logging
 import psycopg2, psycopg2.extras
+from psycopg2 import pool
 try:
     from dotenv import load_dotenv; load_dotenv()
 except ImportError: pass
+
+logger = logging.getLogger(__name__)
 
 DDL = """
 create table if not exists orgs(id text primary key, name text, created_at double precision);
@@ -21,29 +24,52 @@ create index if not exists ix_member on members(user_id);
 """
 
 class DB:
-    def __init__(s):
-        s.url = os.getenv("DATABASE_URL")
-        if not s.url:
+    def __init__(s, url=None):
+        s.url = url or os.getenv("DATABASE_URL")
+        s.pool = None
+        if not s.url or s.url == ":memory:":
             return
         try:
-            for stmt in DDL.strip().split(";\n"):
-                if stmt.strip(): s.run(stmt)
+            s.pool = pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=s.url, connect_timeout=5)
+        except Exception as e:
+            logger.warning("Could not initialize connection pool: %s", e)
+            s.pool = None
+
+        try:
+            with s.tx() as cur:
+                cur.execute(DDL)
         except Exception as e:
             pass
-    
+
     @contextlib.contextmanager
     def tx(s):
         if not s.url:
             raise RuntimeError("Database not available. DATABASE_URL not set.")
-        c = psycopg2.connect(s.url, connect_timeout=5)
+        conn = None
+        from_pool = False
+        if s.pool:
+            try:
+                conn = s.pool.getconn()
+                from_pool = True
+            except Exception:
+                conn = None
+        if conn is None:
+            conn = psycopg2.connect(s.url, connect_timeout=5)
+            from_pool = False
         try:
-            yield c.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            c.commit()
+            yield conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            conn.commit()
         except Exception:
-            c.rollback()
+            if conn:
+                try: conn.rollback()
+                except Exception: pass
             raise
         finally:
-            c.close()
+            if conn:
+                if from_pool and s.pool:
+                    s.pool.putconn(conn)
+                else:
+                    conn.close()
 
     def run(s, sql, p=()):
         if not s.url:
@@ -78,8 +104,10 @@ class DB:
         if not s.url:
             return None
         try:
-            r = s.all(sql, p)
-            return r[0] if r else None
+            with s.tx() as cur:
+                cur.execute(sql, p)
+                r = cur.fetchone()
+                return dict(r) if r else None
         except Exception as e:
             return None
 

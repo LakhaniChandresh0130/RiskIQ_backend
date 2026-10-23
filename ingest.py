@@ -31,9 +31,13 @@ def parse(content: bytes, filename="", usdinr=88.0):
     val = val * np.where(cur == "USD", usdinr, 1.0)
     bad = val.isna() | ~np.isfinite(val) | sym.isin(["", "NAN"]) | (val == 0)
     errs = [{"row": int(i) + 2, "error": "needs a symbol and market_value (or quantity and price)"} for i in df.index[bad][:50]]
-    yf = pd.Series(np.where(sym.str.contains(r"[.=^]"), sym, sym + ex.map(EX).fillna("")), index=df.index)
     cls = col("asset_class", "Equity").fillna("Equity").astype(str).str.strip().str.title().replace({"Fx": "FX"})
     cls = cls.where(cls.isin(["Equity", "Bond", "Commodity", "FX"]), "Equity")
+    is_fx = (cls == "FX") | sym.isin(["USDINR", "EURINR", "GBPINR", "EURUSD", "GBPUSD", "USDJPY", "JPYINR"])
+    is_bond_comm = cls.isin(["Bond", "Commodity"])
+    has_spaces = sym.str.contains(r"\s")
+    base_yf = np.where(sym.str.contains(r"[.=^]"), sym, np.where(is_fx, sym + "=X", np.where(is_bond_comm | has_spaces, sym, sym + ex.map(EX).fillna(""))))
+    yf = pd.Series(base_yf, index=df.index)
     out = pd.DataFrame({"symbol": sym, "name": col("name", "").fillna("").astype(str), "cls": cls, "ccy": cur,
         "sector": col("sector", "Unclassified").fillna("Unclassified").astype(str), "region": np.where(local, "IN", "GL"),
         "value": val, "yf": yf, "dur": pd.to_numeric(col("duration", 0), errors="coerce").fillna(0)})[~bad]
